@@ -2,6 +2,10 @@ import type { Metadata } from "next";
 import { Geist, Geist_Mono } from "next/font/google";
 import "./globals.css";
 
+// รันฟังก์ชันบน Vercel ที่ภูมิภาค "โตเกียว" (hnd1) ให้ตรงกับ Turso (ap-northeast-1)
+// → server กับ database อยู่ใกล้กัน query เร็วขึ้นมาก (ลด latency ข้ามทวีป)
+export const preferredRegion = "hnd1";
+
 const geistSans = Geist({
   variable: "--font-geist-sans",
   subsets: ["latin"],
