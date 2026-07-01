@@ -19,7 +19,7 @@ export default async function TodoDetailPage({
   const { id } = await params; // คลายห่อ Promise เอาค่า id ออกมา
 
   // ดึง todo ตัวเดียวจาก database (Number(id) เพราะ id จาก URL เป็น string)
-  const todo = getTodoById(Number(id));
+  const todo = await getTodoById(Number(id));
 
   // ไม่เจอ → เด้งไปหน้า 404 ของ Next.js อัตโนมัติ (แทน <Route path="*"> เดิม)
   if (!todo) {

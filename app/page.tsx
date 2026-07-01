@@ -8,8 +8,8 @@ import { getStats } from "./todos/db";
 // หน้าแรกก็อ่าน database (สถิติ) → ต้องสดทุก request เช่นกัน
 export const dynamic = "force-dynamic";
 
-export default function Home() {
-  const { total, done, pending } = getStats(); // อ่านสถิติจาก database บน server
+export default async function Home() {
+  const { total, done, pending } = await getStats(); // อ่านสถิติจาก database บน server
 
   return (
     <main className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center gap-8 p-8 text-center">

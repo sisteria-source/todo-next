@@ -11,8 +11,8 @@ import TodoItem from "./TodoItem";
 // เพราะข้อมูล todos เปลี่ยนตลอด → ต้องอ่าน database สดเสมอ
 export const dynamic = "force-dynamic";
 
-export default function TodosPage() {
-  const todos = getTodos(); // อ่านจาก database ตอน render (บน server)
+export default async function TodosPage() {
+  const todos = await getTodos(); // อ่านจาก database ตอน render (บน server)
 
   return (
     <main className="mx-auto flex max-w-md flex-1 flex-col gap-4 p-8">

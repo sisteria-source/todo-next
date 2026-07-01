@@ -1,8 +1,8 @@
-// 🗄️ ไฟล์เชื่อม SQLite database — ทำงานบน server เท่านั้น (มี native module)
-//    ข้อมูลเก็บในไฟล์ todos.db บนดิสก์ → restart server ก็ไม่หายแล้ว!
+// 🗄️ เชื่อม Turso (libSQL) — SQLite เวอร์ชัน cloud ทำงานบน serverless ได้
+//    ⚠️ ต่อผ่านเครือข่าย → ทุกฟังก์ชันเป็น async (ต้อง await)
+//    credentials อ่านจาก .env.local (local) / Environment Variables (Vercel)
 
-import Database from "better-sqlite3";
-import path from "node:path";
+import { createClient } from "@libsql/client";
 
 export type Todo = {
   id: number;
@@ -10,83 +10,101 @@ export type Todo = {
   done: boolean;
 };
 
-// เปิดไฟล์ database (ถ้าไม่มีจะสร้างให้) ที่ root โปรเจกต์ → todos.db
-// ⚠️ ตอน dev Next.js reload โมดูลบ่อย → cache connection ไว้ใน globalThis กันเปิดซ้ำหลายอัน
-const globalForDb = globalThis as unknown as { _db?: Database.Database };
-const db =
-  globalForDb._db ?? new Database(path.join(process.cwd(), "todos.db"));
-if (!globalForDb._db) globalForDb._db = db;
+// สร้าง client เชื่อม Turso — url + token มาจาก environment variables (ไม่ hard-code!)
+const client = createClient({
+  url: process.env.TURSO_DATABASE_URL!,
+  authToken: process.env.TURSO_AUTH_TOKEN!,
+});
 
-// สร้างตารางถ้ายังไม่มี (รันกี่ครั้งก็ปลอดภัยเพราะมี IF NOT EXISTS)
-// SQLite ไม่มีชนิด boolean → เก็บ done เป็นเลข 0/1 แทน
-db.exec(`
-  CREATE TABLE IF NOT EXISTS todos (
-    id   INTEGER PRIMARY KEY AUTOINCREMENT,
-    text TEXT    NOT NULL,
-    done INTEGER NOT NULL DEFAULT 0
-  )
-`);
+// เตรียม database ครั้งเดียวตอนโหลดโมดูล: สร้างตาราง + ใส่ข้อมูลตั้งต้น (ถ้าว่าง)
+// เก็บเป็น promise → ทุกฟังก์ชัน await ก่อน เพื่อให้แน่ใจว่าตารางพร้อมแล้ว
+const ready = (async () => {
+  await client.execute(`
+    CREATE TABLE IF NOT EXISTS todos (
+      id   INTEGER PRIMARY KEY AUTOINCREMENT,
+      text TEXT    NOT NULL,
+      done INTEGER NOT NULL DEFAULT 0
+    )
+  `);
+  const rs = await client.execute("SELECT COUNT(*) AS n FROM todos");
+  if (Number(rs.rows[0].n) === 0) {
+    await client.batch([
+      { sql: "INSERT INTO todos (text, done) VALUES (?, ?)", args: ["เรียน Next.js routing", 1] },
+      { sql: "INSERT INTO todos (text, done) VALUES (?, ?)", args: ["เข้าใจ Server Component", 0] },
+      { sql: "INSERT INTO todos (text, done) VALUES (?, ?)", args: ["ทำหน้า detail ต่อ", 0] },
+    ]);
+  }
+})();
 
-// ใส่ข้อมูลตั้งต้นเฉพาะ "ครั้งแรกสุด" (ตอนตารางยังว่าง)
-const { n } = db.prepare("SELECT COUNT(*) AS n FROM todos").get() as {
-  n: number;
-};
-if (n === 0) {
-  const insert = db.prepare("INSERT INTO todos (text, done) VALUES (?, ?)");
-  insert.run("เรียน Next.js routing", 1);
-  insert.run("เข้าใจ Server Component", 0);
-  insert.run("ทำหน้า detail ต่อ", 0);
-}
-
-// ───────── ฟังก์ชัน query (ให้ actions.ts / page.tsx เรียกใช้) ─────────
-
-// แถวดิบจาก SQLite (done เป็นเลข) → แปลงเป็น Todo (done เป็น boolean)
+// แถวดิบจาก Turso → แปลงเป็น Todo (done เลข 0/1 → boolean)
 type Row = { id: number; text: string; done: number };
-const toTodo = (r: Row): Todo => ({ id: r.id, text: r.text, done: r.done === 1 });
+const toTodo = (r: Row): Todo => ({
+  id: Number(r.id),
+  text: String(r.text),
+  done: Number(r.done) === 1,
+});
 
-// อ่านทั้งหมด — .all() = คืนทุกแถว
-export function getTodos(): Todo[] {
-  const rows = db.prepare("SELECT * FROM todos ORDER BY id").all() as Row[];
-  return rows.map(toTodo);
+// ───────── ฟังก์ชัน query (ตอนนี้เป็น async ทั้งหมด) ─────────
+
+export async function getTodos(): Promise<Todo[]> {
+  await ready;
+  const rs = await client.execute("SELECT * FROM todos ORDER BY id");
+  return rs.rows.map((r) => toTodo(r as unknown as Row));
 }
 
-// นับสถิติ — ให้ database นับด้วย COUNT (เร็วกว่าโหลดทุกแถวมานับใน JS)
-export function getStats(): { total: number; done: number; pending: number } {
-  const total = (
-    db.prepare("SELECT COUNT(*) AS n FROM todos").get() as { n: number }
-  ).n;
-  const done = (
-    db.prepare("SELECT COUNT(*) AS n FROM todos WHERE done = 1").get() as {
-      n: number;
-    }
-  ).n;
+export async function getTodoById(id: number): Promise<Todo | undefined> {
+  await ready;
+  const rs = await client.execute({
+    sql: "SELECT * FROM todos WHERE id = ?",
+    args: [id],
+  });
+  const row = rs.rows[0];
+  return row ? toTodo(row as unknown as Row) : undefined;
+}
+
+export async function getStats(): Promise<{
+  total: number;
+  done: number;
+  pending: number;
+}> {
+  await ready;
+  const totalRs = await client.execute("SELECT COUNT(*) AS n FROM todos");
+  const doneRs = await client.execute(
+    "SELECT COUNT(*) AS n FROM todos WHERE done = 1"
+  );
+  const total = Number(totalRs.rows[0].n);
+  const done = Number(doneRs.rows[0].n);
   return { total, done, pending: total - done };
 }
 
-// อ่านตัวเดียวตาม id — .get() = คืนแถวเดียว (หรือ undefined ถ้าไม่เจอ)
-export function getTodoById(id: number): Todo | undefined {
-  const row = db.prepare("SELECT * FROM todos WHERE id = ?").get(id) as
-    | Row
-    | undefined;
-  return row ? toTodo(row) : undefined;
+export async function insertTodo(text: string): Promise<void> {
+  await ready;
+  await client.execute({
+    sql: "INSERT INTO todos (text, done) VALUES (?, 0)",
+    args: [text],
+  });
 }
 
-// เพิ่ม — ? คือ placeholder กัน SQL injection (ห้ามต่อ string เอง!)
-export function insertTodo(text: string): void {
-  db.prepare("INSERT INTO todos (text, done) VALUES (?, 0)").run(text);
+export async function toggleTodoDone(id: number): Promise<void> {
+  await ready;
+  await client.execute({
+    sql: "UPDATE todos SET done = NOT done WHERE id = ?",
+    args: [id],
+  });
 }
 
-// สลับ done (NOT done = กลับ 0↔1)
-export function toggleTodoDone(id: number): void {
-  db.prepare("UPDATE todos SET done = NOT done WHERE id = ?").run(id);
+export async function updateTodoText(id: number, text: string): Promise<void> {
+  await ready;
+  await client.execute({
+    sql: "UPDATE todos SET text = ? WHERE id = ?",
+    args: [text, id],
+  });
 }
 
-// แก้ข้อความงาน — ? 2 ตัว ส่งค่าเรียงตามลำดับ: (text, id)
-export function updateTodoText(id: number, text: string): void {
-  db.prepare("UPDATE todos SET text = ? WHERE id = ?").run(text, id);
-}
-
-// ลบ
-export function deleteTodoById(id: number): void {
-  db.prepare("DELETE FROM todos WHERE id = ?").run(id);
+export async function deleteTodoById(id: number): Promise<void> {
+  await ready;
+  await client.execute({
+    sql: "DELETE FROM todos WHERE id = ?",
+    args: [id],
+  });
 }

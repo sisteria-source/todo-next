@@ -25,11 +25,11 @@ export async function addTodo(
   // ── กฎ validation (ตรวจที่ server → กันข้อมูลมั่วได้จริง) ──
   if (!text) return { error: "กรุณาพิมพ์ชื่องาน" };
   if (text.length > 100) return { error: "ยาวเกินไป (ห้ามเกิน 100 ตัวอักษร)" };
-  if (getTodos().some((t) => t.text === text)) {
+  if ((await getTodos()).some((t) => t.text === text)) {
     return { error: "มีงานนี้อยู่แล้ว" };
   }
 
-  insertTodo(text);
+  await insertTodo(text);
   revalidatePath("/todos");
   return { error: null }; // สำเร็จ → ไม่มี error
 }
@@ -37,14 +37,14 @@ export async function addTodo(
 // สลับสถานะติ๊ก
 export async function toggleTodo(formData: FormData) {
   const id = Number(formData.get("id"));
-  toggleTodoDone(id);
+  await toggleTodoDone(id);
   revalidatePath("/todos");
 }
 
 // ลบงาน
 export async function deleteTodo(formData: FormData) {
   const id = Number(formData.get("id"));
-  deleteTodoById(id);
+  await deleteTodoById(id);
   revalidatePath("/todos");
 }
 
@@ -54,6 +54,6 @@ export async function updateTodo(formData: FormData) {
   const text = String(formData.get("text") ?? "").trim();
   if (!text) return; // ว่าง → ไม่บันทึก (validation ฝั่ง server)
 
-  updateTodoText(id, text);
+  await updateTodoText(id, text);
   revalidatePath("/todos");
 }
