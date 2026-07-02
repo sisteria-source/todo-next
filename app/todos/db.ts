@@ -1,19 +1,20 @@
-// 🗄️ เชื่อม Turso (libSQL) — ทุก query กรองตาม user_id (แต่ละคนเห็นเฉพาะงานตัวเอง)
+// 🗄️ เชื่อม Turso + query ด้วย Drizzle ORM (type-safe)
 
+import { drizzle } from "drizzle-orm/libsql";
 import { createClient } from "@libsql/client";
+import { and, eq, sql } from "drizzle-orm";
+import { todos } from "./schema";
 
-export type Todo = {
-  id: number;
-  text: string;
-  done: boolean;
-};
+export type Todo = { id: number; text: string; done: boolean };
 
+// client ดิบ (@libsql) ใช้ตอนสร้างตาราง + เอาไปห่อด้วย drizzle สำหรับ query
 const client = createClient({
   url: process.env.TURSO_DATABASE_URL!,
   authToken: process.env.TURSO_AUTH_TOKEN!,
 });
+const db = drizzle(client);
 
-// เตรียม database: สร้างตาราง (มี user_id) + เพิ่มคอลัมน์ให้ตารางเก่า
+// สร้างตารางครั้งเดียว (ยังใช้ raw SQL — Drizzle เน้นที่ "query" ส่วน schema จริงจังใช้ drizzle-kit)
 const ready = (async () => {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS todos (
@@ -23,8 +24,6 @@ const ready = (async () => {
       user_id TEXT
     )
   `);
-  // ตารางเก่า (สร้างก่อนมี auth) ยังไม่มีคอลัมน์ user_id → เพิ่มให้
-  // ถ้ามีแล้วจะ error → catch ทิ้งไปเลย (ไม่เป็นไร)
   try {
     await client.execute("ALTER TABLE todos ADD COLUMN user_id TEXT");
   } catch {
@@ -32,36 +31,29 @@ const ready = (async () => {
   }
 })();
 
-type Row = { id: number; text: string; done: number };
-const toTodo = (r: Row): Todo => ({
-  id: Number(r.id),
-  text: String(r.text),
-  done: Number(r.done) === 1,
-});
-
-// ───────── ทุกฟังก์ชันรับ userId เพื่อกรองเฉพาะงานของคนนั้น ─────────
+// ───────── query ด้วย Drizzle (พิมพ์ชื่อคอลัมน์ผิด = ฟ้องทันที + autocomplete) ─────────
 
 export async function getTodos(userId: string): Promise<Todo[]> {
   await ready;
-  const rs = await client.execute({
-    sql: "SELECT * FROM todos WHERE user_id = ? ORDER BY id",
-    args: [userId],
-  });
-  return rs.rows.map((r) => toTodo(r as unknown as Row));
+  // select เฉพาะคอลัมน์ที่ต้องส่งให้ client (ไม่ส่ง user_id ออกไป)
+  return db
+    .select({ id: todos.id, text: todos.text, done: todos.done })
+    .from(todos)
+    .where(eq(todos.userId, userId))
+    .orderBy(todos.id);
 }
 
-// เช็ค id + user_id คู่กัน → กันคนอื่นเปิดดูงานเราด้วยการเดา id
 export async function getTodoById(
   userId: string,
   id: number
 ): Promise<Todo | undefined> {
   await ready;
-  const rs = await client.execute({
-    sql: "SELECT * FROM todos WHERE id = ? AND user_id = ?",
-    args: [id, userId],
-  });
-  const row = rs.rows[0];
-  return row ? toTodo(row as unknown as Row) : undefined;
+  const rows = await db
+    .select({ id: todos.id, text: todos.text, done: todos.done })
+    .from(todos)
+    // and(...) = เงื่อนไขหลายอันต้องจริงทั้งหมด (id ตรง "และ" เป็นของ user นี้)
+    .where(and(eq(todos.id, id), eq(todos.userId, userId)));
+  return rows[0];
 }
 
 export async function getStats(userId: string): Promise<{
@@ -70,39 +62,40 @@ export async function getStats(userId: string): Promise<{
   pending: number;
 }> {
   await ready;
-  const rs = await client.execute({
-    sql: "SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done FROM todos WHERE user_id = ?",
-    args: [userId],
-  });
-  const total = Number(rs.rows[0].total);
-  const done = Number(rs.rows[0].done);
+  // การนับ/รวม (aggregate) ใช้ sql`` ช่วย — Drizzle drop ลงไปเขียน SQL ตรงได้เมื่อจำเป็น
+  const rows = await db
+    .select({
+      total: sql<number>`count(*)`,
+      done: sql<number>`coalesce(sum(${todos.done}), 0)`,
+    })
+    .from(todos)
+    .where(eq(todos.userId, userId));
+  const total = Number(rows[0].total);
+  const done = Number(rows[0].done);
   return { total, done, pending: total - done };
 }
 
 export async function todoExists(userId: string, text: string): Promise<boolean> {
   await ready;
-  const rs = await client.execute({
-    sql: "SELECT COUNT(*) AS n FROM todos WHERE text = ? AND user_id = ?",
-    args: [text, userId],
-  });
-  return Number(rs.rows[0].n) > 0;
+  const rows = await db
+    .select({ id: todos.id })
+    .from(todos)
+    .where(and(eq(todos.text, text), eq(todos.userId, userId)));
+  return rows.length > 0;
 }
 
 export async function insertTodo(userId: string, text: string): Promise<void> {
   await ready;
-  await client.execute({
-    sql: "INSERT INTO todos (text, done, user_id) VALUES (?, 0, ?)",
-    args: [text, userId],
-  });
+  // .values({...}) type-safe — ใส่ field ผิดชื่อ/ผิด type ฟ้องทันที
+  await db.insert(todos).values({ text, userId, done: false });
 }
 
-// UPDATE/DELETE ใส่ AND user_id = ? → แก้/ลบได้เฉพาะงานตัวเอง (คนอื่นแตะไม่ได้)
 export async function toggleTodoDone(userId: string, id: number): Promise<void> {
   await ready;
-  await client.execute({
-    sql: "UPDATE todos SET done = NOT done WHERE id = ? AND user_id = ?",
-    args: [id, userId],
-  });
+  await db
+    .update(todos)
+    .set({ done: sql`NOT ${todos.done}` }) // สลับ 0↔1 ด้วย sql``
+    .where(and(eq(todos.id, id), eq(todos.userId, userId)));
 }
 
 export async function updateTodoText(
@@ -111,16 +104,15 @@ export async function updateTodoText(
   text: string
 ): Promise<void> {
   await ready;
-  await client.execute({
-    sql: "UPDATE todos SET text = ? WHERE id = ? AND user_id = ?",
-    args: [text, id, userId],
-  });
+  await db
+    .update(todos)
+    .set({ text })
+    .where(and(eq(todos.id, id), eq(todos.userId, userId)));
 }
 
 export async function deleteTodoById(userId: string, id: number): Promise<void> {
   await ready;
-  await client.execute({
-    sql: "DELETE FROM todos WHERE id = ? AND user_id = ?",
-    args: [id, userId],
-  });
+  await db
+    .delete(todos)
+    .where(and(eq(todos.id, id), eq(todos.userId, userId)));
 }
