@@ -3,13 +3,30 @@
 // ไม่ต้อง fetch, ไม่ต้อง useEffect, ไม่ต้อง useState เลย
 
 import Link from "next/link";
+import { auth } from "@/auth";
 import { getStats } from "./todos/db";
 
 // หน้าแรกก็อ่าน database (สถิติ) → ต้องสดทุก request เช่นกัน
 export const dynamic = "force-dynamic";
 
 export default async function Home() {
-  const { total, done, pending } = await getStats(); // อ่านสถิติจาก database บน server
+  const session = await auth();
+
+  // ยังไม่ login (หรือ session เก่าไม่มี id) → หน้าต้อนรับ (ปุ่ม login อยู่ที่ header)
+  if (!session?.user?.id) {
+    return (
+      <main className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center gap-4 p-8 text-center">
+        <h1 className="text-3xl font-bold text-zinc-900 dark:text-zinc-50">
+          📝 Todo App
+        </h1>
+        <p className="text-zinc-600 dark:text-zinc-400">
+          เข้าสู่ระบบ (ปุ่มมุมขวาบน) เพื่อเริ่มจัดการงานของคุณ
+        </p>
+      </main>
+    );
+  }
+
+  const { total, done, pending } = await getStats(session.user.id); // สถิติเฉพาะ user นี้
 
   return (
     <main className="mx-auto flex max-w-md flex-1 flex-col items-center justify-center gap-8 p-8 text-center">

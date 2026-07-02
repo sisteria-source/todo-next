@@ -5,6 +5,7 @@
 
 import Link from "next/link";
 import { notFound } from "next/navigation";
+import { auth } from "@/auth";
 import { getTodoById } from "../db";
 
 // ⚠️ จุดที่ต่างจาก useParams เดิม:
@@ -18,10 +19,14 @@ export default async function TodoDetailPage({
 }) {
   const { id } = await params; // คลายห่อ Promise เอาค่า id ออกมา
 
-  // ดึง todo ตัวเดียวจาก database (Number(id) เพราะ id จาก URL เป็น string)
-  const todo = await getTodoById(Number(id));
+  // เช็ค login — ไม่ login (หรือ session เก่าไม่มี id) → 404 (ไม่มีสิทธิ์ดู)
+  const session = await auth();
+  if (!session?.user?.id) notFound();
 
-  // ไม่เจอ → เด้งไปหน้า 404 ของ Next.js อัตโนมัติ (แทน <Route path="*"> เดิม)
+  // ดึง todo ของ user นี้เท่านั้น (getTodoById กรอง user_id ให้ → คนอื่นเดา id มาดูไม่ได้)
+  const todo = await getTodoById(session.user.id, Number(id));
+
+  // ไม่เจอ (หรือไม่ใช่งานของเรา) → เด้งไปหน้า 404
   if (!todo) {
     notFound();
   }

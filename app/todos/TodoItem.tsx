@@ -1,12 +1,25 @@
 "use client"; // มี useState (จำโหมดแก้) → Client Component
 
-import { useState } from "react";
+import { useState, useOptimistic } from "react";
 import Link from "next/link";
 import type { Todo } from "./db";
 import { toggleTodo, deleteTodo, updateTodo } from "./actions";
 
 export default function TodoItem({ todo }: { todo: Todo }) {
   const [isEditing, setIsEditing] = useState(false);
+
+  // useOptimistic(ค่าจริง, วิธีคำนวณค่าชั่วคราว)
+  //   optimisticDone = ค่าที่ "แสดงบนจอ" (อาจเป็นค่าเดาไว้ก่อน server ตอบ)
+  const [optimisticDone, setOptimisticDone] = useOptimistic(
+    todo.done, // ค่าจริงจาก database (พอ server ตอบ + revalidate จะกลับมาเป็นค่านี้)
+    (_current, newDone: boolean) => newDone // ตอนกด → ใช้ค่าใหม่ที่เดาไว้ทันที
+  );
+
+  // ห่อ toggleTodo: เปลี่ยนจอก่อน (optimistic) แล้วค่อยเรียก server
+  async function handleToggle(formData: FormData) {
+    setOptimisticDone(!optimisticDone); // 1. จอเปลี่ยนทันที
+    await toggleTodo(formData); // 2. server ทำงาน (ช้า) → เสร็จแล้ว revalidate ยืนยัน
+  }
 
   // ───── โหมดแก้ไข ─────
   if (isEditing) {
@@ -45,18 +58,18 @@ export default function TodoItem({ todo }: { todo: Todo }) {
   // ───── โหมดปกติ (ดู) ─────
   return (
     <li className="flex items-center gap-3 rounded-lg border border-zinc-200 p-3 dark:border-zinc-700">
-      {/* ปุ่มติ๊ก */}
-      <form action={toggleTodo}>
+      {/* ปุ่มติ๊ก — ใช้ handleToggle (optimistic) + แสดง optimisticDone */}
+      <form action={handleToggle}>
         <input type="hidden" name="id" value={todo.id} />
         <button className="text-xl" aria-label="สลับสถานะงาน">
-          {todo.done ? "✅" : "⬜"}
+          {optimisticDone ? "✅" : "⬜"}
         </button>
       </form>
 
       <Link
         href={`/todos/${todo.id}`}
         className={`flex-1 hover:underline ${
-          todo.done ? "text-zinc-400 line-through" : ""
+          optimisticDone ? "text-zinc-400 line-through" : ""
         }`}
       >
         {todo.text}

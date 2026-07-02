@@ -1,6 +1,4 @@
-// 🗄️ เชื่อม Turso (libSQL) — SQLite เวอร์ชัน cloud ทำงานบน serverless ได้
-//    ⚠️ ต่อผ่านเครือข่าย → ทุกฟังก์ชันเป็น async (ต้อง await)
-//    credentials อ่านจาก .env.local (local) / Environment Variables (Vercel)
+// 🗄️ เชื่อม Turso (libSQL) — ทุก query กรองตาม user_id (แต่ละคนเห็นเฉพาะงานตัวเอง)
 
 import { createClient } from "@libsql/client";
 
@@ -10,33 +8,30 @@ export type Todo = {
   done: boolean;
 };
 
-// สร้าง client เชื่อม Turso — url + token มาจาก environment variables (ไม่ hard-code!)
 const client = createClient({
   url: process.env.TURSO_DATABASE_URL!,
   authToken: process.env.TURSO_AUTH_TOKEN!,
 });
 
-// เตรียม database ครั้งเดียวตอนโหลดโมดูล: สร้างตาราง + ใส่ข้อมูลตั้งต้น (ถ้าว่าง)
-// เก็บเป็น promise → ทุกฟังก์ชัน await ก่อน เพื่อให้แน่ใจว่าตารางพร้อมแล้ว
+// เตรียม database: สร้างตาราง (มี user_id) + เพิ่มคอลัมน์ให้ตารางเก่า
 const ready = (async () => {
   await client.execute(`
     CREATE TABLE IF NOT EXISTS todos (
-      id   INTEGER PRIMARY KEY AUTOINCREMENT,
-      text TEXT    NOT NULL,
-      done INTEGER NOT NULL DEFAULT 0
+      id      INTEGER PRIMARY KEY AUTOINCREMENT,
+      text    TEXT    NOT NULL,
+      done    INTEGER NOT NULL DEFAULT 0,
+      user_id TEXT
     )
   `);
-  const rs = await client.execute("SELECT COUNT(*) AS n FROM todos");
-  if (Number(rs.rows[0].n) === 0) {
-    await client.batch([
-      { sql: "INSERT INTO todos (text, done) VALUES (?, ?)", args: ["เรียน Next.js routing", 1] },
-      { sql: "INSERT INTO todos (text, done) VALUES (?, ?)", args: ["เข้าใจ Server Component", 0] },
-      { sql: "INSERT INTO todos (text, done) VALUES (?, ?)", args: ["ทำหน้า detail ต่อ", 0] },
-    ]);
+  // ตารางเก่า (สร้างก่อนมี auth) ยังไม่มีคอลัมน์ user_id → เพิ่มให้
+  // ถ้ามีแล้วจะ error → catch ทิ้งไปเลย (ไม่เป็นไร)
+  try {
+    await client.execute("ALTER TABLE todos ADD COLUMN user_id TEXT");
+  } catch {
+    // คอลัมน์มีอยู่แล้ว — ข้าม
   }
 })();
 
-// แถวดิบจาก Turso → แปลงเป็น Todo (done เลข 0/1 → boolean)
 type Row = { id: number; text: string; done: number };
 const toTodo = (r: Row): Todo => ({
   id: Number(r.id),
@@ -44,67 +39,88 @@ const toTodo = (r: Row): Todo => ({
   done: Number(r.done) === 1,
 });
 
-// ───────── ฟังก์ชัน query (ตอนนี้เป็น async ทั้งหมด) ─────────
+// ───────── ทุกฟังก์ชันรับ userId เพื่อกรองเฉพาะงานของคนนั้น ─────────
 
-export async function getTodos(): Promise<Todo[]> {
+export async function getTodos(userId: string): Promise<Todo[]> {
   await ready;
-  const rs = await client.execute("SELECT * FROM todos ORDER BY id");
+  const rs = await client.execute({
+    sql: "SELECT * FROM todos WHERE user_id = ? ORDER BY id",
+    args: [userId],
+  });
   return rs.rows.map((r) => toTodo(r as unknown as Row));
 }
 
-export async function getTodoById(id: number): Promise<Todo | undefined> {
+// เช็ค id + user_id คู่กัน → กันคนอื่นเปิดดูงานเราด้วยการเดา id
+export async function getTodoById(
+  userId: string,
+  id: number
+): Promise<Todo | undefined> {
   await ready;
   const rs = await client.execute({
-    sql: "SELECT * FROM todos WHERE id = ?",
-    args: [id],
+    sql: "SELECT * FROM todos WHERE id = ? AND user_id = ?",
+    args: [id, userId],
   });
   const row = rs.rows[0];
   return row ? toTodo(row as unknown as Row) : undefined;
 }
 
-export async function getStats(): Promise<{
+export async function getStats(userId: string): Promise<{
   total: number;
   done: number;
   pending: number;
 }> {
   await ready;
-  const totalRs = await client.execute("SELECT COUNT(*) AS n FROM todos");
-  const doneRs = await client.execute(
-    "SELECT COUNT(*) AS n FROM todos WHERE done = 1"
-  );
-  const total = Number(totalRs.rows[0].n);
-  const done = Number(doneRs.rows[0].n);
+  const rs = await client.execute({
+    sql: "SELECT COUNT(*) AS total, COALESCE(SUM(done), 0) AS done FROM todos WHERE user_id = ?",
+    args: [userId],
+  });
+  const total = Number(rs.rows[0].total);
+  const done = Number(rs.rows[0].done);
   return { total, done, pending: total - done };
 }
 
-export async function insertTodo(text: string): Promise<void> {
+export async function todoExists(userId: string, text: string): Promise<boolean> {
+  await ready;
+  const rs = await client.execute({
+    sql: "SELECT COUNT(*) AS n FROM todos WHERE text = ? AND user_id = ?",
+    args: [text, userId],
+  });
+  return Number(rs.rows[0].n) > 0;
+}
+
+export async function insertTodo(userId: string, text: string): Promise<void> {
   await ready;
   await client.execute({
-    sql: "INSERT INTO todos (text, done) VALUES (?, 0)",
-    args: [text],
+    sql: "INSERT INTO todos (text, done, user_id) VALUES (?, 0, ?)",
+    args: [text, userId],
   });
 }
 
-export async function toggleTodoDone(id: number): Promise<void> {
+// UPDATE/DELETE ใส่ AND user_id = ? → แก้/ลบได้เฉพาะงานตัวเอง (คนอื่นแตะไม่ได้)
+export async function toggleTodoDone(userId: string, id: number): Promise<void> {
   await ready;
   await client.execute({
-    sql: "UPDATE todos SET done = NOT done WHERE id = ?",
-    args: [id],
+    sql: "UPDATE todos SET done = NOT done WHERE id = ? AND user_id = ?",
+    args: [id, userId],
   });
 }
 
-export async function updateTodoText(id: number, text: string): Promise<void> {
+export async function updateTodoText(
+  userId: string,
+  id: number,
+  text: string
+): Promise<void> {
   await ready;
   await client.execute({
-    sql: "UPDATE todos SET text = ? WHERE id = ?",
-    args: [text, id],
+    sql: "UPDATE todos SET text = ? WHERE id = ? AND user_id = ?",
+    args: [text, id, userId],
   });
 }
 
-export async function deleteTodoById(id: number): Promise<void> {
+export async function deleteTodoById(userId: string, id: number): Promise<void> {
   await ready;
   await client.execute({
-    sql: "DELETE FROM todos WHERE id = ?",
-    args: [id],
+    sql: "DELETE FROM todos WHERE id = ? AND user_id = ?",
+    args: [id, userId],
   });
 }
